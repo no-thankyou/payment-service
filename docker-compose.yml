@@ -1,0 +1,79 @@
+x-app-env: &app-env
+  DATABASE_URL: postgresql+asyncpg://payments:payments@postgres:5432/payments
+  RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
+  API_KEY: ${API_KEY:-dev-api-key}
+  RETRY_MAX_ATTEMPTS: ${RETRY_MAX_ATTEMPTS:-3}
+  RETRY_BASE_DELAY_MS: ${RETRY_BASE_DELAY_MS:-1000}
+  GATEWAY_MIN_DELAY_S: ${GATEWAY_MIN_DELAY_S:-2}
+  GATEWAY_MAX_DELAY_S: ${GATEWAY_MAX_DELAY_S:-5}
+  GATEWAY_SUCCESS_RATE: ${GATEWAY_SUCCESS_RATE:-0.9}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+      POSTGRES_DB: payments
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports: ["5672:5672", "15672:15672"]
+    volumes: [rabbitdata:/var/lib/rabbitmq]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  api:
+    build: .
+    image: payment-service:latest
+    # The api is the only service that runs migrations (consumer waits for it to be healthy).
+    # `exec` replaces the shell, so uvicorn is PID 1 and receives SIGTERM for graceful shutdown.
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && exec uvicorn --factory payment_service.api.main:app_factory --host 0.0.0.0 --port 8000
+    environment: *app-env
+    restart: unless-stopped
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  consumer:
+    image: payment-service:latest
+    command: ["faststream", "run", "--factory", "payment_service.consumer.main:app_factory"]
+    environment: *app-env
+    depends_on:
+      api: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+    restart: unless-stopped
+    # Lets in-flight handlers (gateway 2-5 s + webhook) and the relay finish on SIGTERM.
+    stop_grace_period: 30s
+
+  # Dev-only webhook receiver for the e2e test / README demo: `docker compose --profile dev up`.
+  webhook-sink:
+    image: payment-service:latest
+    profiles: [dev]
+    command: ["uvicorn", "payment_service.devtools.webhook_sink:app", "--host", "0.0.0.0", "--port", "8080"]
+    ports: ["8081:8080"]
+    depends_on:
+      api: {condition: service_healthy}
+
+volumes:
+  pgdata:
+  rabbitdata:
