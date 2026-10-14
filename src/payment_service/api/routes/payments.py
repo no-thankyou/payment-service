@@ -18,11 +18,10 @@ from pydantic import ValidationError
 from payment_service.api.deps import (
     IDEMPOTENCY_KEY_OPENAPI_PARAM,
     IdempotencyKeyDep,
-    SessionFactoryDep,
+    PaymentServiceDep,
 )
 from payment_service.api.errors import ApiError
 from payment_service.api.schemas import ErrorBody, PaymentAccepted, PaymentCreate, PaymentRead
-from payment_service.services.payments import create_payment, get_payment
 
 REPLAYED_HEADER = "Idempotent-Replayed"
 MAX_BODY_BYTES = 65536
@@ -126,13 +125,13 @@ async def create_payment_endpoint(
     request: Request,
     response: Response,
     key: IdempotencyKeyDep,
-    session_factory: SessionFactoryDep,
+    service: PaymentServiceDep,
 ) -> PaymentAccepted:
     payload = await _parse_body(request)
-    result = await create_payment(session_factory, key, payload.to_new_payment())
+    result = await service.create(key, payload.to_new_payment())
     if result.replayed:
         response.headers[REPLAYED_HEADER] = "true"
-    return PaymentAccepted.from_model(result.payment)
+    return PaymentAccepted.from_domain(result.payment)
 
 
 @router.get(
@@ -146,6 +145,6 @@ async def create_payment_endpoint(
 )
 async def get_payment_endpoint(
     payment_id: Annotated[UUID, Path()],
-    session_factory: SessionFactoryDep,
+    service: PaymentServiceDep,
 ) -> PaymentRead:
-    return PaymentRead.from_model(await get_payment(session_factory, payment_id))
+    return PaymentRead.from_domain(await service.get(payment_id))

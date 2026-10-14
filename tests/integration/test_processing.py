@@ -12,6 +12,7 @@ import respx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from payment_service.db.models import Payment
+from payment_service.db.uow import make_uow_factory
 from payment_service.domain.enums import Currency, PaymentStatus
 from payment_service.domain.errors import PaymentNotFoundError, WebhookDeliveryError
 from payment_service.services.gateway import EmulatedGateway
@@ -101,7 +102,7 @@ async def test_pending_succeeded_and_delivered(
     payment_id = await _insert_payment(session_factory)
     gateway = FakeGateway(PaymentStatus.SUCCEEDED)
 
-    await PaymentProcessor(session_factory, gateway, sender).process(payment_id)
+    await PaymentProcessor(make_uow_factory(session_factory), gateway, sender).process(payment_id)
 
     payment = await _get(session_factory, payment_id)
     assert payment.status == PaymentStatus.SUCCEEDED
@@ -127,9 +128,9 @@ async def test_gateway_decline_is_delivered_as_failed(
     route = mock_http.post(WEBHOOK_URL).mock(return_value=httpx.Response(200))
     payment_id = await _insert_payment(session_factory)
 
-    await PaymentProcessor(session_factory, FakeGateway(PaymentStatus.FAILED), sender).process(
-        payment_id
-    )
+    await PaymentProcessor(
+        make_uow_factory(session_factory), FakeGateway(PaymentStatus.FAILED), sender
+    ).process(payment_id)
 
     payment = await _get(session_factory, payment_id)
     assert payment.status == PaymentStatus.FAILED
@@ -146,7 +147,7 @@ async def test_webhook_failure_then_redelivery(
     route = mock_http.post(WEBHOOK_URL).mock(side_effect=[httpx.Response(500), httpx.Response(200)])
     payment_id = await _insert_payment(session_factory)
     gateway = FakeGateway(PaymentStatus.SUCCEEDED)
-    processor = PaymentProcessor(session_factory, gateway, sender)
+    processor = PaymentProcessor(make_uow_factory(session_factory), gateway, sender)
 
     with pytest.raises(WebhookDeliveryError):
         await processor.process(payment_id)
@@ -178,7 +179,7 @@ async def test_already_delivered_is_noop(
     )
     gateway = FakeGateway()
 
-    await PaymentProcessor(session_factory, gateway, sender).process(payment_id)
+    await PaymentProcessor(make_uow_factory(session_factory), gateway, sender).process(payment_id)
 
     payment = await _get(session_factory, payment_id)
     assert gateway.calls == []
@@ -193,7 +194,7 @@ async def test_unknown_payment_raises_not_found(
 ) -> None:
     gateway = FakeGateway()
     with pytest.raises(PaymentNotFoundError):
-        await PaymentProcessor(session_factory, gateway, sender).process(uuid4())
+        await PaymentProcessor(make_uow_factory(session_factory), gateway, sender).process(uuid4())
     assert gateway.calls == []
 
 
@@ -207,7 +208,7 @@ async def test_terminal_undelivered_payment_is_not_recharged(
     payment_id = await _insert_payment(session_factory, status=PaymentStatus.SUCCEEDED)
     gateway = FakeGateway(PaymentStatus.FAILED)
 
-    await PaymentProcessor(session_factory, gateway, sender).process(payment_id)
+    await PaymentProcessor(make_uow_factory(session_factory), gateway, sender).process(payment_id)
 
     payment = await _get(session_factory, payment_id)
     assert gateway.calls == []
@@ -225,7 +226,7 @@ async def test_concurrent_duplicates_do_not_overwrite_status(
     route = mock_http.post(WEBHOOK_URL).mock(return_value=httpx.Response(200))
     payment_id = await _insert_payment(session_factory)
     gateway = FakeGateway(PaymentStatus.SUCCEEDED, PaymentStatus.FAILED)
-    processor = PaymentProcessor(session_factory, gateway, sender)
+    processor = PaymentProcessor(make_uow_factory(session_factory), gateway, sender)
 
     await asyncio.gather(processor.process(payment_id), processor.process(payment_id))
 
@@ -265,7 +266,7 @@ async def test_status_update_failure_after_charge_keeps_first_gateway_outcome(
     route = mock_http.post(WEBHOOK_URL).mock(return_value=httpx.Response(200))
     payment_id = await _insert_payment(session_factory)
     gateway = RecordingGateway(EmulatedGateway(0, 0, 0.5, rng=random.Random(0)))
-    processor = PaymentProcessor(session_factory, gateway, sender)
+    processor = PaymentProcessor(make_uow_factory(session_factory), gateway, sender)
 
     original_apply = PaymentProcessor._apply_status
     failures = iter([True])

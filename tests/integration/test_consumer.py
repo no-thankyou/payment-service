@@ -35,9 +35,11 @@ from payment_service.broker.topology import (
 from payment_service.consumer.main import create_consumer
 from payment_service.core.config import Settings
 from payment_service.db.models import Payment
+from payment_service.db.uow import make_uow_factory
 from payment_service.domain.enums import Currency, PaymentStatus
 from payment_service.domain.events import PaymentCreatedEvent
-from payment_service.services.payments import NewPayment, create_payment
+from payment_service.domain.models import NewPayment
+from payment_service.services.payments import PaymentService
 
 pytestmark = pytest.mark.integration
 
@@ -133,8 +135,7 @@ async def publisher(settings: Settings) -> AsyncIterator[RabbitBroker]:
 
 
 async def _create(session_factory: SessionFactory) -> UUID:
-    result = await create_payment(
-        session_factory,
+    result = await PaymentService(make_uow_factory(session_factory)).create(
         f"key-{uuid4()}",
         NewPayment(
             amount=Decimal("10.50"),

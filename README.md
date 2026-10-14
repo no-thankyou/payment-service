@@ -46,6 +46,24 @@ RabbitMQ 4 + FastStream, httpx, Docker Compose, uv, ruff, mypy (strict), pytest 
 `alembic upgrade head`), `consumer` (FastStream: объявляет топологию, запускает outbox relay,
 обрабатывает очередь).
 
+### Слои
+
+```
+api/, consumer/            транспорт: HTTP и RabbitMQ, сборка зависимостей (composition root)
+        │
+services/, outbox/relay    бизнес-логика: работает с доменом и портами, ничего не знает об SQL
+        │  UnitOfWork, PaymentRepository, OutboxRepository  (domain/repositories.py, Protocol)
+        ▼
+db/repositories, db/uow    доступ к данным: SQLAlchemy, запросы, маппинг ORM → доменные модели
+```
+
+- Доменные модели (`domain/models.py`) это обычные dataclass'ы. ORM-модели не выходят за пределы `db/`.
+- `UnitOfWork` задаёт границу транзакции: репозитории работают в его сессии, без `commit()` всё
+  откатывается. Поэтому платёж и outbox-сообщение пишутся атомарно, а у consumer'а каждый шаг
+  остаётся отдельной короткой транзакцией.
+- Сервисы зависят только от протоколов, так что бизнес-правила тестируются на in-memory
+  репозиториях без БД (`tests/unit/fakes.py`).
+
 ### Ключевые гарантии
 
 - **Outbox, at-least-once.** API в одной транзакции пишет платёж и строку в `outbox`, поэтому после `202`
@@ -295,8 +313,10 @@ Compose часть из них можно переопределить в `.env`
 Что покрыто:
 
 - **unit:** конфигурация, валидация схем (amount/currency/metadata/url), канонический хэш запроса,
-  формат событий, эмулятор шлюза, отправка webhook'ов, генерация RabbitMQ-топологии.
-- **integration**: миграции и модели; API целиком
+  формат событий, эмулятор шлюза, отправка webhook'ов, генерация RabbitMQ-топологии; бизнес-логика
+  сервиса платежей, обработчика и outbox relay на in-memory репозиториях.
+- **integration**: миграции и модели; репозитории и unit of work (конфликт ключа, откат без
+  commit, условные UPDATE, `SKIP LOCKED`); API целиком
   (auth, 400/401/404/413/415/422, порядок проверок, replay, `/health`); сервис платежей (платёж и outbox в
   одной транзакции, конкурентные запросы с одним ключом); outbox relay (публикация, `SKIP LOCKED`, обработка ошибок); топология
   RabbitMQ; обработка платежа (идемпотентность, отказ шлюза, отсутствие повторного списания);
@@ -309,8 +329,8 @@ Compose часть из них можно переопределить в `.env`
 ```
 src/payment_service/
   core/        настройки (pydantic-settings), логирование
-  domain/      enum'ы, события, ошибки (без I/O)
-  db/          модели SQLAlchemy, сессии
+  domain/      доменные модели, enum'ы, события, ошибки, порты репозиториев (без I/O)
+  db/          слой доступа к данным: модели SQLAlchemy, сессии, репозитории, unit of work
   services/    бизнес-логика: payments (идемпотентность + outbox), gateway, webhook, processing
   broker/      топология RabbitMQ и фабрика брокера (единственное место с именами очередей)
   outbox/      outbox relay (DB → RabbitMQ)

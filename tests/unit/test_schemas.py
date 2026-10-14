@@ -10,8 +10,8 @@ from pydantic import ValidationError
 from payment_service.api.deps import validate_idempotency_key
 from payment_service.api.errors import ApiError
 from payment_service.api.schemas import MAX_METADATA_BYTES, PaymentCreate, PaymentRead
-from payment_service.db.models import Payment
 from payment_service.domain.enums import Currency, PaymentStatus
+from payment_service.domain.models import Payment
 from payment_service.services.payments import compute_request_hash
 
 
@@ -105,7 +105,7 @@ def test_payment_read_serialisation() -> None:
         amount=Decimal("100.5"),
         currency=Currency.RUB,
         description="Order",
-        metadata_={"a": 1},
+        metadata={"a": 1},
         status=PaymentStatus.SUCCEEDED,
         webhook_url="https://merchant.example.com/hooks",
         webhook_attempts=1,
@@ -113,7 +113,7 @@ def test_payment_read_serialisation() -> None:
         created_at=now,
         processed_at=now,
     )
-    data = PaymentRead.from_model(payment).model_dump(mode="json")
+    data = PaymentRead.from_domain(payment).model_dump(mode="json")
     assert data == {
         "payment_id": str(payment.id),
         "amount": "100.50",

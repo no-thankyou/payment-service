@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from payment_service.api.errors import ApiError
 from payment_service.core.config import Settings
+from payment_service.services.payments import PaymentService
 
 MAX_IDEMPOTENCY_KEY_LENGTH = 255
 
@@ -25,6 +26,11 @@ def get_app_settings(request: Request) -> Settings:
 def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
     factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
     return factory
+
+
+def get_payment_service(request: Request) -> PaymentService:
+    service: PaymentService = request.app.state.payment_service
+    return service
 
 
 async def require_api_key(
@@ -82,4 +88,5 @@ async def idempotency_key(
 
 
 SessionFactoryDep = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
+PaymentServiceDep = Annotated[PaymentService, Depends(get_payment_service)]
 IdempotencyKeyDep = Annotated[str, Depends(idempotency_key)]

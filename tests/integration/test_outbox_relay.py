@@ -23,6 +23,7 @@ from payment_service.broker.topology import (
 )
 from payment_service.core.config import Settings
 from payment_service.db.models import OutboxEvent
+from payment_service.db.uow import make_uow_factory
 from payment_service.outbox.relay import OutboxRelay
 
 pytestmark = pytest.mark.integration
@@ -112,7 +113,7 @@ def _relay(
     batch_size: int = 100,
     poll_interval_s: float = 0.05,
 ) -> OutboxRelay:
-    return OutboxRelay(session_factory, broker, batch_size, poll_interval_s)
+    return OutboxRelay(make_uow_factory(session_factory), broker, batch_size, poll_interval_s)
 
 
 async def test_run_once_publishes_in_created_at_order(

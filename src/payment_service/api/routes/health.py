@@ -4,10 +4,10 @@ import logging
 
 from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
 
 from payment_service.api.deps import SessionFactoryDep
 from payment_service.api.schemas import HealthStatus
+from payment_service.db.session import ping
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +21,7 @@ router = APIRouter(tags=["health"])
 )
 async def health(session_factory: SessionFactoryDep) -> JSONResponse:
     try:
-        async with session_factory() as session:
-            await session.execute(text("SELECT 1"))
+        await ping(session_factory)
     except Exception:
         logger.warning("health check: database unavailable", exc_info=True)
         return JSONResponse(

@@ -7,14 +7,12 @@ commit publishes the same row again; the consumer deduplicates by payment state.
 import asyncio
 import contextlib
 import logging
-from datetime import UTC, datetime
 
 from aiormq import spec
 from faststream.rabbit import RabbitBroker
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from payment_service.db.models import OutboxEvent
+from payment_service.domain.models import OutboxMessage
+from payment_service.domain.repositories import UnitOfWorkFactory
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +28,14 @@ class UnroutableMessageError(Exception):
 class OutboxRelay:
     def __init__(
         self,
-        session_factory: async_sessionmaker[AsyncSession],
+        uow_factory: UnitOfWorkFactory,
         broker: RabbitBroker,
         batch_size: int,
         poll_interval_s: float,
     ) -> None:
         if batch_size < 1:
             raise ValueError(f"batch_size must be >= 1, got {batch_size}")
-        self._session_factory = session_factory
+        self._uow_factory = uow_factory
         self._broker = broker
         self._batch_size = batch_size
         self._poll_interval_s = poll_interval_s
@@ -45,15 +43,16 @@ class OutboxRelay:
     async def run_once(self) -> int:
         """Publish one batch of unpublished rows in ``created_at`` order; return how many were sent.
 
-        The whole batch runs in ONE transaction that stays open while publishing. This is the
-        deliberate exception to "no transaction across I/O": the ``FOR UPDATE SKIP
-        LOCKED`` row locks are what stop concurrent relays from publishing the same row. Each
-        publish waits for the publisher confirm, so ``published_at`` is only set for confirmed rows.
+        The whole batch runs in ONE unit of work that stays open while publishing. This is the
+        deliberate exception to "no transaction across I/O": the row locks taken by
+        ``lock_unpublished`` (``FOR UPDATE SKIP LOCKED``) are what stop concurrent relays from
+        publishing the same message. Each publish waits for the publisher confirm, so a message is
+        only marked published once confirmed.
 
-        On the first failed publish the row gets ``attempts += 1`` / ``last_error`` and the rest of
-        the batch is left untouched (to preserve ordering); the transaction is still committed so
-        the already published rows and the error info persist. The failed row is retried on the
-        next poll.
+        On the first failed publish the message gets ``attempts += 1`` / ``last_error`` and the
+        rest of the batch is left untouched (to preserve ordering); the unit of work is still
+        committed so the already published messages and the error info persist. The failed one is
+        retried on the next poll.
 
         Unroutable messages: with ``mandatory=True`` and publisher confirms on (the factory default,
         ``on_return_raises=False``), aiormq resolves the publish with the returned message instead
@@ -62,54 +61,48 @@ class OutboxRelay:
         ``aiormq.exceptions.DeliveryError`` and are handled the same way.
         """
         published = 0
-        async with self._session_factory() as session, session.begin():
-            stmt = (
-                select(OutboxEvent)
-                .where(OutboxEvent.published_at.is_(None))
-                .order_by(OutboxEvent.created_at)
-                .limit(self._batch_size)
-                .with_for_update(skip_locked=True)
-            )
-            rows = (await session.scalars(stmt)).all()
-            for row in rows:
+        async with self._uow_factory() as uow:
+            messages = await uow.outbox.lock_unpublished(self._batch_size)
+            for message in messages:
                 try:
-                    await self._publish(row)
+                    await self._publish(message)
                 except Exception as exc:
-                    row.attempts += 1
-                    row.last_error = (str(exc) or repr(exc))[:LAST_ERROR_MAX_LEN]
+                    error = (str(exc) or repr(exc))[:LAST_ERROR_MAX_LEN]
+                    attempts = await uow.outbox.record_failure(message.id, error)
                     logger.warning(
                         "outbox publish failed: id=%s event_type=%s attempts=%d error=%r",
-                        row.id,
-                        row.event_type,
-                        row.attempts,
+                        message.id,
+                        message.event_type,
+                        attempts,
                         exc,
                     )
                     break
-                row.published_at = datetime.now(UTC)
+                await uow.outbox.mark_published(message.id)
                 published += 1
+            await uow.commit()
         if published:
             logger.debug("outbox relay published %d event(s)", published)
         return published
 
-    async def _publish(self, row: OutboxEvent) -> None:
+    async def _publish(self, message: OutboxMessage) -> None:
         # A str exchange is wrapped by FastStream into ``RabbitExchange(name)`` and opened with a
         # passive declare (``declare=False``), i.e. it is never (re)declared with other options.
         result = await self._broker.publish(
-            row.payload,
-            exchange=row.exchange,
-            routing_key=row.routing_key,
-            message_id=str(row.id),
+            message.payload,
+            exchange=message.exchange,
+            routing_key=message.routing_key,
+            message_id=str(message.id),
             persist=True,
             mandatory=True,
             content_type="application/json",
-            headers={"x-event-type": row.event_type},
+            headers={"x-event-type": message.event_type},
             timeout=PUBLISH_TIMEOUT_S,
         )
         # None: confirms disabled (not our setup). Anything but Ack: returned (unroutable) message.
         if result is not None and not isinstance(result, spec.Basic.Ack):
             raise UnroutableMessageError(
-                f"message returned by broker: exchange={row.exchange!r} "
-                f"routing_key={row.routing_key!r}"
+                f"message returned by broker: exchange={message.exchange!r} "
+                f"routing_key={message.routing_key!r}"
             )
 
     async def run_forever(self, stop: asyncio.Event) -> None:

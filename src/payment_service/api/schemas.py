@@ -16,9 +16,8 @@ from pydantic import (
     field_validator,
 )
 
-from payment_service.db.models import Payment
 from payment_service.domain.enums import Currency, PaymentStatus
-from payment_service.services.payments import NewPayment
+from payment_service.domain.models import NewPayment, Payment
 
 MAX_METADATA_BYTES = 16384
 MAX_WEBHOOK_URL_LENGTH = 2048
@@ -93,7 +92,7 @@ class PaymentAccepted(BaseModel):
     created_at: datetime
 
     @classmethod
-    def from_model(cls, payment: Payment) -> "PaymentAccepted":
+    def from_domain(cls, payment: Payment) -> "PaymentAccepted":
         return cls(payment_id=payment.id, status=payment.status, created_at=payment.created_at)
 
 
@@ -112,13 +111,13 @@ class PaymentRead(BaseModel):
     processed_at: datetime | None
 
     @classmethod
-    def from_model(cls, payment: Payment) -> "PaymentRead":
+    def from_domain(cls, payment: Payment) -> "PaymentRead":
         return cls(
             payment_id=payment.id,
             amount=payment.amount,
             currency=payment.currency,
             description=payment.description,
-            metadata=payment.metadata_,
+            metadata=payment.metadata,
             status=payment.status,
             idempotency_key=payment.idempotency_key,
             webhook_url=payment.webhook_url,

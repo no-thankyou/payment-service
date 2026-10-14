@@ -19,6 +19,7 @@ from payment_service.consumer.handler import PaymentEventHandler
 from payment_service.core.config import Settings, get_settings
 from payment_service.core.logging import configure_logging
 from payment_service.db.session import create_engine, create_session_factory
+from payment_service.db.uow import make_uow_factory
 from payment_service.domain.events import PaymentCreatedEvent
 from payment_service.outbox.relay import OutboxRelay
 from payment_service.services.gateway import EmulatedGateway, PaymentGateway
@@ -70,7 +71,7 @@ class _ConsumerRuntime:
 
         gateway = self._injected_gateway or EmulatedGateway.from_settings(self.settings)
         webhook = WebhookSender(http_client, timeout_s=self.settings.webhook_timeout_s)
-        processor = PaymentProcessor(self.session_factory, gateway, webhook)
+        processor = PaymentProcessor(make_uow_factory(self.session_factory), gateway, webhook)
         self.handler = PaymentEventHandler(self.settings, self.broker, processor)
 
         # Declared before the subscriber starts consuming, so the DLX/DLQ and retry queues exist
@@ -81,7 +82,7 @@ class _ConsumerRuntime:
         if self.session_factory is None:  # pragma: no cover - on_startup always runs first
             raise RuntimeError("consumer runtime is not started")
         relay = OutboxRelay(
-            self.session_factory,
+            make_uow_factory(self.session_factory),
             self.broker,
             batch_size=self.settings.outbox_batch_size,
             poll_interval_s=self.settings.outbox_poll_interval_s,

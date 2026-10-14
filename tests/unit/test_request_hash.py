@@ -2,7 +2,8 @@ from dataclasses import replace
 from decimal import Decimal
 
 from payment_service.domain.enums import Currency
-from payment_service.services.payments import NewPayment, compute_request_hash
+from payment_service.domain.models import NewPayment
+from payment_service.services.payments import compute_request_hash
 
 
 def _data(**overrides: object) -> NewPayment:

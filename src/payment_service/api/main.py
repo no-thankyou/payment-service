@@ -15,6 +15,14 @@ from payment_service.api.routes import health, payments
 from payment_service.core.config import Settings, get_settings
 from payment_service.core.logging import configure_logging
 from payment_service.db.session import create_engine, create_session_factory
+from payment_service.db.uow import make_uow_factory
+from payment_service.services.payments import PaymentService
+
+
+def _init_state(app: FastAPI, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Composition root of the API: wire the services onto the data-access layer."""
+    app.state.session_factory = session_factory
+    app.state.payment_service = PaymentService(make_uow_factory(session_factory))
 
 
 def create_app(
@@ -27,11 +35,11 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if session_factory is not None:
-            app.state.session_factory = session_factory
+            _init_state(app, session_factory)
             yield
             return
         engine = create_engine(settings.database_url)
-        app.state.session_factory = create_session_factory(engine)
+        _init_state(app, create_session_factory(engine))
         try:
             yield
         finally:
@@ -41,7 +49,7 @@ def create_app(
     app.state.settings = settings
     if session_factory is not None:
         # Available even when the ASGI lifespan is not run (e.g. httpx ASGITransport in tests).
-        app.state.session_factory = session_factory
+        _init_state(app, session_factory)
 
     api_v1 = APIRouter(prefix="/api/v1", dependencies=[Depends(require_api_key)])
     api_v1.include_router(payments.router)

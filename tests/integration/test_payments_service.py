@@ -8,19 +8,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from payment_service.broker.topology import NEW_ROUTING_KEY, PAYMENTS_EXCHANGE_NAME
 from payment_service.db.models import OutboxEvent, Payment
+from payment_service.db.uow import make_uow_factory
 from payment_service.domain.enums import Currency, PaymentStatus
 from payment_service.domain.errors import IdempotencyKeyReusedError, PaymentNotFoundError
 from payment_service.domain.events import PAYMENT_CREATED
-from payment_service.services.payments import (
-    NewPayment,
-    compute_request_hash,
-    create_payment,
-    get_payment,
-)
+from payment_service.domain.models import NewPayment
+from payment_service.services.payments import PaymentService, compute_request_hash
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("clean_db")]
 
 SessionFactory = async_sessionmaker[AsyncSession]
+
+
+@pytest.fixture
+def service(session_factory: SessionFactory) -> PaymentService:
+    return PaymentService(make_uow_factory(session_factory))
 
 
 def _data(amount: str = "100.50") -> NewPayment:
@@ -47,9 +49,11 @@ async def _outbox(session_factory: SessionFactory) -> list[OutboxEvent]:
         return list((await session.scalars(select(OutboxEvent))).all())
 
 
-async def test_create_inserts_payment_and_outbox(session_factory: SessionFactory) -> None:
+async def test_create_inserts_payment_and_outbox(
+    service: PaymentService, session_factory: SessionFactory
+) -> None:
     data = _data()
-    result = await create_payment(session_factory, "key-1", data)
+    result = await service.create("key-1", data)
 
     assert result.replayed is False
     p = result.payment
@@ -73,9 +77,11 @@ async def test_create_inserts_payment_and_outbox(session_factory: SessionFactory
     assert UUID(event.payload["event_id"]) == event.id
 
 
-async def test_replay_same_body_returns_existing(session_factory: SessionFactory) -> None:
-    first = await create_payment(session_factory, "key-1", _data())
-    second = await create_payment(session_factory, "key-1", _data("100.5"))
+async def test_replay_same_body_returns_existing(
+    service: PaymentService, session_factory: SessionFactory
+) -> None:
+    first = await service.create("key-1", _data())
+    second = await service.create("key-1", _data("100.5"))
 
     assert second.replayed is True
     assert second.payment.id == first.payment.id
@@ -84,25 +90,29 @@ async def test_replay_same_body_returns_existing(session_factory: SessionFactory
     assert await _count(session_factory, OutboxEvent) == 1
 
 
-async def test_same_key_different_body_rejected(session_factory: SessionFactory) -> None:
-    await create_payment(session_factory, "key-1", _data())
+async def test_same_key_different_body_rejected(
+    service: PaymentService, session_factory: SessionFactory
+) -> None:
+    await service.create("key-1", _data())
     with pytest.raises(IdempotencyKeyReusedError):
-        await create_payment(session_factory, "key-1", _data("200.00"))
+        await service.create("key-1", _data("200.00"))
     assert await _count(session_factory, Payment) == 1
     assert await _count(session_factory, OutboxEvent) == 1
 
 
-async def test_different_keys_create_separate_payments(session_factory: SessionFactory) -> None:
-    a = await create_payment(session_factory, "key-a", _data())
-    b = await create_payment(session_factory, "key-b", _data())
+async def test_different_keys_create_separate_payments(
+    service: PaymentService, session_factory: SessionFactory
+) -> None:
+    a = await service.create("key-a", _data())
+    b = await service.create("key-b", _data())
     assert a.payment.id != b.payment.id
     assert await _count(session_factory, OutboxEvent) == 2
 
 
-async def test_concurrent_creates_with_same_key(session_factory: SessionFactory) -> None:
-    results = await asyncio.gather(
-        *(create_payment(session_factory, "race-key", _data()) for _ in range(10))
-    )
+async def test_concurrent_creates_with_same_key(
+    service: PaymentService, session_factory: SessionFactory
+) -> None:
+    results = await asyncio.gather(*(service.create("race-key", _data()) for _ in range(10)))
 
     assert len({r.payment.id for r in results}) == 1
     assert sum(not r.replayed for r in results) == 1
@@ -110,20 +120,22 @@ async def test_concurrent_creates_with_same_key(session_factory: SessionFactory)
     assert await _count(session_factory, OutboxEvent) == 1
 
 
-async def test_get_payment_roundtrip(session_factory: SessionFactory) -> None:
+async def test_get_payment_roundtrip(
+    service: PaymentService, session_factory: SessionFactory
+) -> None:
     data = _data()
-    created = await create_payment(session_factory, "key-1", data)
+    created = await service.create("key-1", data)
 
-    loaded = await get_payment(session_factory, created.payment.id)
+    loaded = await service.get(created.payment.id)
     assert loaded.id == created.payment.id
-    assert loaded.metadata_ == data.metadata
+    assert loaded.metadata == data.metadata
     assert loaded.webhook_url == data.webhook_url
     assert loaded.description == data.description
     assert loaded.status is PaymentStatus.PENDING
 
 
-async def test_get_payment_unknown(session_factory: SessionFactory) -> None:
+async def test_get_payment_unknown(service: PaymentService) -> None:
     unknown = uuid4()
     with pytest.raises(PaymentNotFoundError) as exc_info:
-        await get_payment(session_factory, unknown)
+        await service.get(unknown)
     assert exc_info.value.payment_id == unknown
