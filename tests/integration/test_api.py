@@ -12,8 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from payment_service.api.main import create_app
 from payment_service.api.routes.payments import MAX_BODY_BYTES
 from payment_service.core.config import Settings
+from payment_service.db.database import Database
 from payment_service.db.models import OutboxEvent, Payment
-from payment_service.db.session import create_engine, create_session_factory
+from payment_service.db.session import create_engine
 
 pytestmark = pytest.mark.integration
 
@@ -56,7 +57,7 @@ def _headers(
 async def client(
     migrated_db: str, session_factory: SessionFactory, clean_db: None
 ) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_app(_settings(migrated_db), session_factory)
+    app = create_app(_settings(migrated_db), Database(session_factory))
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -350,7 +351,7 @@ async def test_health_unavailable() -> None:
     url = "postgresql+asyncpg://u:p@127.0.0.1:1/none"
     engine = create_engine(url)
     try:
-        app = create_app(_settings(url), create_session_factory(engine))
+        app = create_app(_settings(url), Database.from_engine(engine))
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as c:

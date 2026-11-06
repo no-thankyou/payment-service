@@ -54,10 +54,10 @@ api/, consumer/            транспорт: HTTP и RabbitMQ, сборка з
 services/, outbox/relay    бизнес-логика: работает с доменом и портами, ничего не знает об SQL
         │  UnitOfWork, PaymentRepository, OutboxRepository  (domain/repositories.py, Protocol)
         ▼
-db/repositories, db/uow    доступ к данным: SQLAlchemy, запросы, маппинг ORM → доменные модели
+db/ (Database, repositories, uow)  доступ к данным: SQLAlchemy, запросы, маппинг ORM → доменные модели
 ```
 
-- Доменные модели (`domain/models.py`) это обычные dataclass'ы. ORM-модели не выходят за пределы `db/`.
+- Доменные модели (`domain/models.py`) это обычные dataclass'ы. ORM-модели не выходят за пределы `db/`. Транспортные слои получают из `db/` только фасад `Database` (`uow_factory`, `ping`) и SQLAlchemy не импортируют.
 - `UnitOfWork` задаёт границу транзакции: репозитории работают в его сессии, без `commit()` всё
   откатывается. Поэтому платёж и outbox-сообщение пишутся атомарно, а у consumer'а каждый шаг
   остаётся отдельной короткой транзакцией.

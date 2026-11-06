@@ -34,6 +34,7 @@ from payment_service.broker.topology import (
 )
 from payment_service.consumer.main import create_consumer
 from payment_service.core.config import Settings
+from payment_service.db.database import Database
 from payment_service.db.models import Payment
 from payment_service.db.uow import make_uow_factory
 from payment_service.domain.enums import Currency, PaymentStatus
@@ -117,7 +118,7 @@ async def consumer(
 ) -> AsyncIterator[FastStream]:
     async with httpx.AsyncClient() as client:
         app = create_consumer(
-            settings, session_factory=session_factory, gateway=gateway, http_client=client
+            settings, database=Database(session_factory), gateway=gateway, http_client=client
         )
         await app.start()
         try:

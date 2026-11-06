@@ -1,11 +1,11 @@
 """FastAPI dependencies: API key auth, Idempotency-Key header, app-scoped resources."""
 
 import secrets
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import Depends, Header, Request, Security, status
 from fastapi.security import APIKeyHeader
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from payment_service.api.errors import ApiError
 from payment_service.core.config import Settings
@@ -23,9 +23,12 @@ def get_app_settings(request: Request) -> Settings:
     return settings
 
 
-def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
-    factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
-    return factory
+HealthCheck = Callable[[], Awaitable[None]]
+
+
+def get_health_check(request: Request) -> HealthCheck:
+    check: HealthCheck = request.app.state.health_check
+    return check
 
 
 def get_payment_service(request: Request) -> PaymentService:
@@ -87,6 +90,6 @@ async def idempotency_key(
     return validate_idempotency_key(key)
 
 
-SessionFactoryDep = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
+HealthCheckDep = Annotated[HealthCheck, Depends(get_health_check)]
 PaymentServiceDep = Annotated[PaymentService, Depends(get_payment_service)]
 IdempotencyKeyDep = Annotated[str, Depends(idempotency_key)]

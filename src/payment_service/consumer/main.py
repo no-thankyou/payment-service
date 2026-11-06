@@ -11,15 +11,13 @@ import httpx
 from faststream import AckPolicy, FastStream
 from faststream.rabbit import RabbitBroker
 from faststream.rabbit.annotations import RabbitMessage
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from payment_service.broker.factory import make_broker
 from payment_service.broker.topology import PAYMENTS_EXCHANGE, PAYMENTS_NEW_QUEUE, declare_topology
 from payment_service.consumer.handler import PaymentEventHandler
 from payment_service.core.config import Settings, get_settings
 from payment_service.core.logging import configure_logging
-from payment_service.db.session import create_engine, create_session_factory
-from payment_service.db.uow import make_uow_factory
+from payment_service.db.database import Database
 from payment_service.domain.events import PaymentCreatedEvent
 from payment_service.outbox.relay import OutboxRelay
 from payment_service.services.gateway import EmulatedGateway, PaymentGateway
@@ -38,19 +36,19 @@ class _ConsumerRuntime:
         self,
         settings: Settings,
         broker: RabbitBroker,
-        session_factory: async_sessionmaker[AsyncSession] | None,
+        database: Database | None,
         gateway: PaymentGateway | None,
         http_client: httpx.AsyncClient | None,
     ) -> None:
         self.settings = settings
         self.broker = broker
-        self._injected_session_factory = session_factory
+        self._injected_database = database
         self._injected_gateway = gateway
         self._injected_http_client = http_client
 
-        self.session_factory: async_sessionmaker[AsyncSession] | None = None
+        self.database: Database | None = None
         self.handler: PaymentEventHandler | None = None
-        self._own_engine: AsyncEngine | None = None
+        self._own_database: Database | None = None
         self._own_http_client: httpx.AsyncClient | None = None
         self._stop = asyncio.Event()
         self._relay_task: asyncio.Task[None] | None = None
@@ -59,11 +57,10 @@ class _ConsumerRuntime:
         configure_logging(self.settings.log_level)
         self._stop = asyncio.Event()
 
-        if self._injected_session_factory is not None:
-            self.session_factory = self._injected_session_factory
+        if self._injected_database is not None:
+            self.database = self._injected_database
         else:
-            self._own_engine = create_engine(self.settings.database_url)
-            self.session_factory = create_session_factory(self._own_engine)
+            self._own_database = self.database = Database.from_url(self.settings.database_url)
 
         http_client = self._injected_http_client
         if http_client is None:
@@ -71,7 +68,7 @@ class _ConsumerRuntime:
 
         gateway = self._injected_gateway or EmulatedGateway.from_settings(self.settings)
         webhook = WebhookSender(http_client, timeout_s=self.settings.webhook_timeout_s)
-        processor = PaymentProcessor(make_uow_factory(self.session_factory), gateway, webhook)
+        processor = PaymentProcessor(self.database.uow_factory, gateway, webhook)
         self.handler = PaymentEventHandler(self.settings, self.broker, processor)
 
         # Declared before the subscriber starts consuming, so the DLX/DLQ and retry queues exist
@@ -79,10 +76,10 @@ class _ConsumerRuntime:
         await declare_topology(self.broker, self.settings)
 
     async def after_startup(self) -> None:
-        if self.session_factory is None:  # pragma: no cover - on_startup always runs first
+        if self.database is None:  # pragma: no cover - on_startup always runs first
             raise RuntimeError("consumer runtime is not started")
         relay = OutboxRelay(
-            make_uow_factory(self.session_factory),
+            self.database.uow_factory,
             self.broker,
             batch_size=self.settings.outbox_batch_size,
             poll_interval_s=self.settings.outbox_poll_interval_s,
@@ -103,21 +100,21 @@ class _ConsumerRuntime:
         if self._own_http_client is not None:
             await self._own_http_client.aclose()
             self._own_http_client = None
-        if self._own_engine is not None:
-            await self._own_engine.dispose()
-            self._own_engine = None
+        if self._own_database is not None:
+            await self._own_database.dispose()
+            self._own_database = None
 
 
 def create_consumer(
     settings: Settings,
     *,
-    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    database: Database | None = None,
     gateway: PaymentGateway | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> FastStream:
     """Build the consumer app. Injected dependencies are used as-is and never closed here."""
     broker = make_broker(settings)
-    runtime = _ConsumerRuntime(settings, broker, session_factory, gateway, http_client)
+    runtime = _ConsumerRuntime(settings, broker, database, gateway, http_client)
 
     @broker.subscriber(PAYMENTS_NEW_QUEUE, PAYMENTS_EXCHANGE, ack_policy=AckPolicy.REJECT_ON_ERROR)
     async def on_payment_created(event: PaymentCreatedEvent, msg: RabbitMessage) -> None:
